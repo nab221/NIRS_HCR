@@ -673,9 +673,22 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 return;
             end
             
-            [file, path] = uiputfile('*.csv', 'Select or Create Output CSV File', 'NIRS_HCR_output.csv');
+            [file, path] = uigetfile('*.csv', 'Select (data will be appended) or Create Output CSV File', 'NIRS_HCR_output.csv');
             if isequal(file, 0); return; end
             csv_filename = fullfile(path, file);
+
+            % Check if file exists and inform user about appending
+            if exist(csv_filename, 'file')
+                choice = uiconfirm(app.UIFigure, ...
+                    sprintf('The file "%s" already exists. Your data will be appended as a new row to the existing data.', file), ...
+                    'Append to Existing File', ...
+                    'Options', {'Continue', 'Cancel'}, ...
+                    'DefaultOption', 'Continue', ...
+                    'Icon', 'info');
+                if strcmp(choice, 'Cancel')
+                    return;
+                end
+            end
 
             % Define table structure with clear TSI and TotalHb labeling
             var_names = {'NIRS_filename', 'NIRS_reduction', 'TimeNadir','MeanRed', ...
