@@ -24,7 +24,6 @@ classdef NIRS_HCR < matlab.apps.AppBase
         HCRAUCLabel              matlab.ui.control.Label
         fileLabel                matlab.ui.control.Label
         SelectsegmentsPanel      matlab.ui.container.Panel
-        RecorveryButton          matlab.ui.control.Button
         ExerciseButton           matlab.ui.control.Button
         BaselineButton           matlab.ui.control.Button
         FilterPanel              matlab.ui.container.Panel
@@ -160,6 +159,38 @@ classdef NIRS_HCR < matlab.apps.AppBase
                     interval_indices(end) = length(app.Data.NIRS.cumsum);
                 end
                 app.Data.NIRS.halfmin = app.Data.NIRS.cumsum(interval_indices);
+                
+                % Recovery calculations (T50 and T100) if recovery data exists
+                if isfield(app.Data.NIRS, 'recorvery') && ~isempty(app.Data.NIRS.recorvery)
+                    recovery_data = TSI(app.Data.NIRS.recorvery);
+                    recovery_time = app.Data.NIRS.time(app.Data.NIRS.recorvery);
+                    
+                    % Calculate target values for recovery
+                    target_50 = mean_baseline_TSI - 0.5 * (mean_baseline_TSI - min_exercise_TSI);  % 50% recovery
+                    target_100 = mean_baseline_TSI;  % 100% recovery (back to baseline)
+                    
+                    % Find T50 (time to 50% recovery)
+                    recovery_start_time = app.Data.NIRS.time(app.Data.NIRS.exercise(end));
+                    idx_50 = find(recovery_data >= target_50, 1, 'first');
+                    if ~isempty(idx_50)
+                        app.Data.NIRS.T50 = recovery_time(idx_50) - recovery_start_time;
+                    else
+                        app.Data.NIRS.T50 = NaN;  % Recovery to 50% not achieved
+                    end
+                    
+                    % Find T100 (time to 100% recovery)
+                    idx_100 = find(recovery_data >= target_100, 1, 'first');
+                    if ~isempty(idx_100)
+                        app.Data.NIRS.T100 = recovery_time(idx_100) - recovery_start_time;
+                    else
+                        app.Data.NIRS.T100 = NaN;  % Full recovery not achieved
+                    end
+                    
+                    fprintf('Recovery metrics: T50 = %.1f s, T100 = %.1f s\n', app.Data.NIRS.T50, app.Data.NIRS.T100);
+                else
+                    app.Data.NIRS.T50 = NaN;
+                    app.Data.NIRS.T100 = NaN;
+                end
             end
 
             % HCR Calculations
@@ -280,6 +311,31 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 % Mark nadir point
                 plot(app.ax2, time_at_nadir, min_exercise_TSI, 'r*', 'MarkerSize', 10, 'DisplayName', 'Nadir');
                 
+                % Add recovery target lines and T50/T100 markers if recovery exists
+                if isfield(app.Data.NIRS, 'recorvery') && ~isempty(app.Data.NIRS.recorvery)
+                    recovery_time = app.Data.NIRS.time(app.Data.NIRS.recorvery);
+                    x_lim_recovery = [recovery_time(1), recovery_time(end)];
+                    
+                    % 50% recovery line
+                    target_50 = mean_baseline_TSI - 0.5 * (mean_baseline_TSI - min_exercise_TSI);
+                    plot(app.ax2, x_lim_recovery, [target_50, target_50], 'g--', 'LineWidth', 1, 'DisplayName', '50% Recovery Target');
+                    
+                    % 100% recovery line (baseline)
+                    plot(app.ax2, x_lim_recovery, [mean_baseline_TSI, mean_baseline_TSI], 'b--', 'LineWidth', 1, 'DisplayName', '100% Recovery Target');
+                    
+                    % Mark T50 and T100 as vertical lines if achieved
+                    y_limits = ylim(app.ax2);
+                    if isfield(app.Data.NIRS, 'T50') && ~isnan(app.Data.NIRS.T50)
+                        t50_time = app.Data.NIRS.time(app.Data.NIRS.exercise(end)) + app.Data.NIRS.T50;
+                        plot(app.ax2, [t50_time, t50_time], y_limits, 'g-', 'LineWidth', 2, 'DisplayName', 'T50');
+                    end
+                    
+                    if isfield(app.Data.NIRS, 'T100') && ~isnan(app.Data.NIRS.T100)
+                        t100_time = app.Data.NIRS.time(app.Data.NIRS.exercise(end)) + app.Data.NIRS.T100;
+                        plot(app.ax2, [t100_time, t100_time], y_limits, 'b-', 'LineWidth', 2, 'DisplayName', 'T100');
+                    end
+                end
+                
                 % Set up relative y-axis
                 yyaxis(app.ax2, "right");
                 current_ylim = get(app.ax2, 'YLim');
@@ -342,7 +398,23 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % NIRS value labels
             if isfield(app.Data.NIRS, 'halfmin')
                 app.NIRS_value.Text = sprintf('30s: %.2f, 60s: %.2f, 90s: %.2f, 120s: %.2f, 150s: %.2f, 180s: %.2f', app.Data.NIRS.halfmin);
-                app.NIRS_nadir_value.Text = sprintf('Reduction of %.2f %% after %.1f s', app.Data.NIRS.reduction_nadir, app.Data.NIRS.time_nadir);
+                
+                % Enhanced nadir display with recovery metrics
+                nadir_text = sprintf('Reduction of %.2f %% after %.1f s', app.Data.NIRS.reduction_nadir, app.Data.NIRS.time_nadir);
+                if isfield(app.Data.NIRS, 'T50') && isfield(app.Data.NIRS, 'T100')
+                    if ~isnan(app.Data.NIRS.T50)
+                        nadir_text = [nadir_text, sprintf(' | T50: %.1f s', app.Data.NIRS.T50)];
+                    else
+                        nadir_text = [nadir_text, ' | T50: Not achieved'];
+                    end
+                    
+                    if ~isnan(app.Data.NIRS.T100)
+                        nadir_text = [nadir_text, sprintf(', T100: %.1f s', app.Data.NIRS.T100)];
+                    else
+                        nadir_text = [nadir_text, ', T100: Not achieved'];
+                    end
+                end
+                app.NIRS_nadir_value.Text = nadir_text;
             else
                 app.NIRS_value.Text = 'Segments not selected';
                 app.NIRS_nadir_value.Text = 'Segments not selected';
@@ -557,9 +629,11 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % Define table structure
             var_names = {'NIRS_filename', 'NIRS_reduction', 'TimeNadir','MeanRed', ...
                          'NIRS_30s','NIRS_60s','NIRS_90s','NIRS_120s','NIRS_150s','NIRS_180s', ...
+                         'T50', 'T100', ...
                          'HCR_filename','HCR_30s','HCR_60s','HCR_90s','HCR_120s','HCR_150s','HCR_180s','Max_HCR',...
                          'HCR_target_30s','HCR_target_60s','HCR_target_90s','HCR_target_120s','HCR_target_150s','HCR_target_180s'};
             var_types = {'string', 'double','double','double','double','double','double','double','double','double', ...
+                         'double', 'double', ...
                          'string','double','double','double','double','double','double','double','double','double','double','double','double','double'};
 
             % Read existing table or create a new one
@@ -584,6 +658,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
                       app.Data.NIRS.time_nadir, ...
                       app.Data.NIRS.mean_reduction, ...
                       nirs_halfmin_cell{:}, ...
+                      app.Data.NIRS.T50, ...
+                      app.Data.NIRS.T100, ...
                       app.Data.HCR.filename, ...
                       hcr_halfmin_cell{:}, ...
                       app.Data.HCR.max, ...
@@ -646,12 +722,23 @@ classdef NIRS_HCR < matlab.apps.AppBase
         end
 
         function ExerciseButtonPushed(app, event)
-            app.Data.NIRS.exercise = selectTimeSegment(app);
-            refreshDisplay(app);
-        end
-
-        function RecorveryButtonPushed(app, event)
-            app.Data.NIRS.recorvery = selectTimeSegment(app);
+            exercise_indices = selectTimeSegment(app);
+            if ~isempty(exercise_indices)
+                app.Data.NIRS.exercise = exercise_indices;
+                
+                % Automatically define recovery as from end of exercise to end of data
+                if ~isempty(exercise_indices)
+                    recovery_start = exercise_indices(end) + 1;
+                    recovery_end = length(app.Data.NIRS.time);
+                    if recovery_start <= recovery_end
+                        app.Data.NIRS.recorvery = recovery_start:recovery_end;
+                        fprintf('Recovery automatically set from index %d to %d\n', recovery_start, recovery_end);
+                    else
+                        app.Data.NIRS.recorvery = []; % No recovery data available
+                        fprintf('Warning: No recovery data available after exercise\n');
+                    end
+                end
+            end
             refreshDisplay(app);
         end
 
@@ -782,27 +869,21 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % Create SelectsegmentsPanel
             app.SelectsegmentsPanel = uipanel(app.UIFigure);
             app.SelectsegmentsPanel.TitlePosition = 'centertop';
-            app.SelectsegmentsPanel.Title = 'Select segments';
+            app.SelectsegmentsPanel.Title = 'Select segments (Recovery is automatic)';
             app.SelectsegmentsPanel.Visible = 'off';
             app.SelectsegmentsPanel.Position = [195 0 213 53];
 
             % Create BaselineButton
             app.BaselineButton = uibutton(app.SelectsegmentsPanel, 'push');
             app.BaselineButton.ButtonPushedFcn = createCallbackFcn(app, @BaselineButtonPushed, true);
-            app.BaselineButton.Position = [1 2 65 29];
+            app.BaselineButton.Position = [1 2 100 29];
             app.BaselineButton.Text = 'Baseline';
 
             % Create ExerciseButton
             app.ExerciseButton = uibutton(app.SelectsegmentsPanel, 'push');
             app.ExerciseButton.ButtonPushedFcn = createCallbackFcn(app, @ExerciseButtonPushed, true);
-            app.ExerciseButton.Position = [70 2 68 29];
+            app.ExerciseButton.Position = [105 2 100 29];
             app.ExerciseButton.Text = 'Exercise';
-
-            % Create RecorveryButton
-            app.RecorveryButton = uibutton(app.SelectsegmentsPanel, 'push');
-            app.RecorveryButton.ButtonPushedFcn = createCallbackFcn(app, @RecorveryButtonPushed, true);
-            app.RecorveryButton.Position = [142 2 70 29];
-            app.RecorveryButton.Text = 'Recovery';
 
             % Create fileLabel
             app.fileLabel = uilabel(app.UIFigure);
