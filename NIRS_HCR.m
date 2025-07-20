@@ -69,6 +69,11 @@ classdef NIRS_HCR < matlab.apps.AppBase
 
         function loadNIRSData(app, nirs_data, short_filename)
             % Loads NIRS data into the app's data structure.
+            % Add validation to ensure nirs_data is a structure
+            if ~isstruct(nirs_data)
+                error('NIRS data must be a structure, but received %s', class(nirs_data));
+            end
+            
             app.Data.NIRS = nirs_data;
             if ~isfield(nirs_data, 'filename')
                 app.Data.NIRS.filename = short_filename;
@@ -78,9 +83,20 @@ classdef NIRS_HCR < matlab.apps.AppBase
 
         function loadHCRData(app, HCR_data, short_filename)
             % Loads HCR data into the app's data structure.
+            % Add validation to ensure HCR_data is a structure or empty
+            if ~isempty(HCR_data) && ~isstruct(HCR_data)
+                error('HCR data must be a structure or empty, but received %s', class(HCR_data));
+            end
+            
             app.Data.HCR = HCR_data;
-             if ~isfield(HCR_data, 'filename')
+            if ~isempty(HCR_data) && ~isfield(HCR_data, 'filename')
                 app.Data.HCR.filename = short_filename;
+            end
+            
+            % Set MaxPowerNEditField if HCR data has max field
+            if ~isempty(HCR_data) && isfield(HCR_data, 'max')
+                app.MaxPowerNEditField.Value = HCR_data.max;
+                fprintf('Set MaxPowerNEditField to: %.2f\n', HCR_data.max);
             end
         end
 
@@ -147,7 +163,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             end
 
             % HCR Calculations
-            if isfield(app.Data, 'HCR') && isfield(app.Data.HCR, 'SumN')
+            if isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && isfield(app.Data.HCR, 'SumN')
                 if ~isfield(app.Data.HCR, 'max')
                     app.Data.HCR.max = max(app.Data.HCR.SumN);
                 end
@@ -156,22 +172,53 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 dt = app.Data.HCR.dt;
                 app.Data.HCR.cumsum = cumsum(app.Data.HCR.SumN * dt);
                 interval_indices = round((30:30:180) / dt);
-                app.Data.HCR.halfmin = app.Data.HCR.cumsum(interval_indices);
                 
-                % Time on Target
-                max_power = app.MaxPowerNEditField.Value;
-                low_thresh = app.HCR_TARGET_LOW_PERCENT * max_power;
-                high_thresh = app.HCR_TARGET_HIGH_PERCENT * max_power;
-                
-                on_target_binary = app.Data.HCR.SumN > low_thresh & app.Data.HCR.SumN < high_thresh;
-                alltarget = cumsum(on_target_binary) * dt;
-                
-                aux = round((0:30:180) / dt);
-                aux(1) = 1;
-                if aux(end) > length(alltarget)
-                    aux(end) = length(alltarget);
+                % Ensure interval_indices don't exceed the cumsum array length
+                valid_indices = interval_indices <= length(app.Data.HCR.cumsum);
+                if any(~valid_indices)
+                    fprintf('Warning: Some HCR interval indices exceed data length. Adjusting...\n');
+                    interval_indices = interval_indices(valid_indices);
+                    if isempty(interval_indices)
+                        % If no valid indices, use the last available index
+                        interval_indices = length(app.Data.HCR.cumsum);
+                    end
                 end
-                app.Data.HCR.target = diff(alltarget(aux));
+                
+                app.Data.HCR.halfmin = app.Data.HCR.cumsum(interval_indices);
+                % Pad with NaN if we have fewer than 6 values (30s, 60s, 90s, 120s, 150s, 180s)
+                if length(app.Data.HCR.halfmin) < 6
+                    app.Data.HCR.halfmin(end+1:6) = NaN;
+                end
+                
+                % Time on Target calculation with bounds checking
+                if app.MaxPowerNEditField.Value > 0  % Only if max power is set
+                    max_power = app.MaxPowerNEditField.Value;
+                    low_thresh = app.HCR_TARGET_LOW_PERCENT * max_power;
+                    high_thresh = app.HCR_TARGET_HIGH_PERCENT * max_power;
+                    
+                    on_target_binary = app.Data.HCR.SumN > low_thresh & app.Data.HCR.SumN < high_thresh;
+                    alltarget = cumsum(on_target_binary) * dt;
+                    
+                    aux = round((0:30:180) / dt);
+                    aux(1) = 1;
+                    
+                    % Ensure aux indices don't exceed alltarget length
+                    valid_aux = aux <= length(alltarget);
+                    if any(~valid_aux)
+                        fprintf('Warning: Some target calculation indices exceed data length. Adjusting...\n');
+                        aux = aux(valid_aux);
+                    end
+                    
+                    if length(aux) > 1
+                        app.Data.HCR.target = diff(alltarget(aux));
+                        % Pad with NaN if we have fewer than 6 values
+                        if length(app.Data.HCR.target) < 6
+                            app.Data.HCR.target(end+1:6) = NaN;
+                        end
+                    else
+                        app.Data.HCR.target = zeros(1, 6);  % Default to zeros if calculation fails
+                    end
+                end
             end
         end
 
@@ -252,7 +299,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
         function updateHCRPlot(app)
             % Updates the HCR plot (ax3).
             cla(app.ax3);
-            if ~isfield(app.Data, 'HCR') || ~isfield(app.Data.HCR, 'SumN')
+            if ~isfield(app.Data, 'HCR') || isempty(app.Data.HCR) || ~isfield(app.Data.HCR, 'SumN')
+                title(app.ax3, 'HCR Data - No Data Loaded');
                 return;
             end
             
@@ -301,7 +349,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             end
             
             % HCR value labels and controls
-            if isfield(app.Data, 'HCR') && isfield(app.Data.HCR, 'halfmin')
+            if isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && isfield(app.Data.HCR, 'halfmin')
                 app.HCR_value.Text = sprintf('30s: %.2f, 60s: %.2f, 90s: %.2f, 120s: %.2f, 150s: %.2f, 180s: %.2f', app.Data.HCR.halfmin);
                 app.HCRfilename.Text = app.Data.HCR.filename;
                 app.MaxPowerNEditField.Enable = 'on';
@@ -314,7 +362,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 app.CalculateButton.Enable = 'off';
             end
             
-            if isfield(app.Data, 'HCR') && isfield(app.Data.HCR, 'target')
+            if isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && isfield(app.Data.HCR, 'target')
                 app.HCR_on_target.Text = sprintf('On Target (s):\n30s: %.2f, 60s: %.2f\n90s: %.2f, 120s: %.2f\n150s: %.2f, 180s: %.2f', app.Data.HCR.target);
             else
                 app.HCR_on_target.Text = '';
@@ -326,6 +374,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.HCR.Enable = 'on';
             
             can_save_csv = isfield(app.Data.NIRS, 'recorvery') && ...
+                           isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && ...
                            isfield(app.Data.HCR, 'target');
             app.save_csv.Enable = matlab.lang.OnOffSwitchState(can_save_csv);
             app.SaveCSVButton.Enable = matlab.lang.OnOffSwitchState(can_save_csv);
@@ -423,7 +472,15 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 loaded_data = load(fullfile(pathname, filename));
                 resetAppData(app);
                 
+                % Debug: Check what variables are in the loaded file
+                fprintf('Variables in loaded file: %s\n', strjoin(fieldnames(loaded_data), ', '));
+                
                 if isfield(loaded_data, 'nirs_data')
+                    % Debug: Check the type of nirs_data
+                    fprintf('nirs_data type: %s\n', class(loaded_data.nirs_data));
+                    if isstruct(loaded_data.nirs_data)
+                        fprintf('nirs_data fields: %s\n', strjoin(fieldnames(loaded_data.nirs_data), ', '));
+                    end
                     loadNIRSData(app, loaded_data.nirs_data, filename);
                 else
                     uialert(app.UIFigure, 'The selected file does not contain "nirs_data".', 'Loading Error');
@@ -431,11 +488,31 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 end
                 
                 if isfield(loaded_data, 'HCR_data')
-                    loadHCRData(app, loaded_data.HCR_data, loaded_data.HCR_data.filename);
+                    % Debug: Check the type of HCR_data
+                    fprintf('HCR_data type: %s\n', class(loaded_data.HCR_data));
+                    if isstruct(loaded_data.HCR_data)
+                        fprintf('HCR_data fields: %s\n', strjoin(fieldnames(loaded_data.HCR_data), ', '));
+                        % Check if HCR_data has filename field before accessing it
+                        if isfield(loaded_data.HCR_data, 'filename')
+                            loadHCRData(app, loaded_data.HCR_data, loaded_data.HCR_data.filename);
+                        else
+                            loadHCRData(app, loaded_data.HCR_data, 'Unknown HCR file');
+                        end
+                    else
+                        loadHCRData(app, loaded_data.HCR_data, 'Unknown HCR file');
+                    end
                 end
                 
                 refreshDisplay(app);
             catch ME
+                % More detailed error reporting
+                fprintf('Error details:\n');
+                fprintf('Message: %s\n', ME.message);
+                fprintf('Identifier: %s\n', ME.identifier);
+                fprintf('Stack trace:\n');
+                for i = 1:length(ME.stack)
+                    fprintf('  %s (line %d)\n', ME.stack(i).name, ME.stack(i).line);
+                end
                 uialert(app.UIFigure, ['Failed to load file: ' ME.message], 'Loading Error');
             end
         end
@@ -461,6 +538,18 @@ classdef NIRS_HCR < matlab.apps.AppBase
 
         function save_csvClicked(app, event)
             % Callback for 'Save CSV' button. Appends current results to a CSV file.
+            
+            % Check if required data exists
+            if ~isfield(app.Data.NIRS, 'recorvery')
+                uialert(app.UIFigure, 'Please select all NIRS segments (baseline, exercise, recovery) before saving.', 'Data Missing');
+                return;
+            end
+            
+            if ~isfield(app.Data, 'HCR') || isempty(app.Data.HCR) || ~isfield(app.Data.HCR, 'target')
+                uialert(app.UIFigure, 'Please load and process HCR data before saving.', 'HCR Data Missing');
+                return;
+            end
+            
             [file, path] = uiputfile('*.csv', 'Select or Create Output CSV File', 'NIRS_HCR_output.csv');
             if isequal(file, 0); return; end
             csv_filename = fullfile(path, file);
@@ -542,8 +631,13 @@ classdef NIRS_HCR < matlab.apps.AppBase
         % --- UI CONTROL CALLBACKS --- %
 
         function CalculateButtonPushed(app, event)         
-            app.Data.HCR.max = get(app.MaxPowerNEditField, 'value');
-            refreshDisplay(app); % Recalculate and replot with new max power
+            % Only perform calculation if HCR data exists and is not empty
+            if isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && isfield(app.Data.HCR, 'SumN')
+                app.Data.HCR.max = get(app.MaxPowerNEditField, 'value');
+                refreshDisplay(app); % Recalculate and replot with new max power
+            else
+                uialert(app.UIFigure, 'No HCR data loaded. Please load HCR data first.', 'HCR Data Missing');
+            end
         end
 
         function BaselineButtonPushed(app, event)
