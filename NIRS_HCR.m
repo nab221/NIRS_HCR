@@ -12,6 +12,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
         refreshICON              matlab.ui.container.toolbar.PushTool
         NIRS_nadir_value         matlab.ui.control.Label
         NIRS_label_2             matlab.ui.control.Label
+        NIRS_recovery_value      matlab.ui.control.Label
+        NIRS_recovery_label      matlab.ui.control.Label
         SaveCSVButton            matlab.ui.control.Button
         NIRS_value               matlab.ui.control.Label
         NIRS_label               matlab.ui.control.Label
@@ -61,6 +63,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.fileLabel.Text = 'No file open';
             app.NIRS_value.Text = 'Segments not selected';
             app.NIRS_nadir_value.Text = 'Segments not selected';
+            app.NIRS_recovery_value.Text = 'Segments not selected';
             app.HCR_value.Text = 'No HCR selected';
             app.HCRfilename.Text = '';
             app.HCR_on_target.Text = '';
@@ -151,14 +154,48 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 exercise_data_normalized = (exercise_data - mean_baseline_TSI) / mean_baseline_TSI;
                 app.Data.NIRS.AUC = sum(exercise_data_normalized);
                 
-                % Cumulative Sum at 30s intervals
-                app.Data.NIRS.cumsum = cumsum(exercise_data_normalized);
+                % TSI Cumulative Sum at 30s intervals
+                app.Data.NIRS.TSI_cumsum = cumsum(exercise_data_normalized);
                 time_step = diff(app.Data.NIRS.time(1:2));
                 interval_indices = round((30:30:180) / time_step);
-                if interval_indices(end) > length(app.Data.NIRS.cumsum)
-                    interval_indices(end) = length(app.Data.NIRS.cumsum);
+                if interval_indices(end) > length(app.Data.NIRS.TSI_cumsum)
+                    interval_indices(end) = length(app.Data.NIRS.TSI_cumsum);
                 end
-                app.Data.NIRS.halfmin = app.Data.NIRS.cumsum(interval_indices);
+                app.Data.NIRS.TSI_halfmin = app.Data.NIRS.TSI_cumsum(interval_indices);
+                
+                % Total Hb (O2Hb + HHb) analysis
+                O2Hb_exercise = app.Data.NIRS.absO2Hb(app.Data.NIRS.exercise);
+                HHb_exercise = app.Data.NIRS.absHHb(app.Data.NIRS.exercise);
+                TotalHb_exercise = O2Hb_exercise + HHb_exercise;
+                
+                % Apply same filter to Total Hb if enabled
+                if app.filter.Value
+                    TotalHb_exercise = filtfilt(d, TotalHb_exercise);
+                end
+                
+                % Calculate baseline Total Hb for normalization
+                O2Hb_baseline = app.Data.NIRS.absO2Hb(app.Data.NIRS.baseline);
+                HHb_baseline = app.Data.NIRS.absHHb(app.Data.NIRS.baseline);
+                TotalHb_baseline = O2Hb_baseline + HHb_baseline;
+                
+                if app.filter.Value
+                    TotalHb_baseline = filtfilt(d, TotalHb_baseline);
+                end
+                
+                mean_baseline_TotalHb = mean(TotalHb_baseline);
+                
+                % Total Hb normalized data and cumulative sum
+                TotalHb_exercise_normalized = (TotalHb_exercise - mean_baseline_TotalHb) / mean_baseline_TotalHb;
+                app.Data.NIRS.TotalHb_cumsum = cumsum(TotalHb_exercise_normalized);
+                
+                % Total Hb cumulative sum at 30s intervals
+                if interval_indices(end) > length(app.Data.NIRS.TotalHb_cumsum)
+                    interval_indices_TotalHb = interval_indices;
+                    interval_indices_TotalHb(end) = length(app.Data.NIRS.TotalHb_cumsum);
+                else
+                    interval_indices_TotalHb = interval_indices;
+                end
+                app.Data.NIRS.TotalHb_halfmin = app.Data.NIRS.TotalHb_cumsum(interval_indices_TotalHb);
                 
                 % Recovery calculations (T50 and T100) if recovery data exists
                 if isfield(app.Data.NIRS, 'recorvery') && ~isempty(app.Data.NIRS.recorvery)
@@ -186,7 +223,6 @@ classdef NIRS_HCR < matlab.apps.AppBase
                         app.Data.NIRS.T100 = NaN;  % Full recovery not achieved
                     end
                     
-                    fprintf('Recovery metrics: T50 = %.1f s, T100 = %.1f s\n', app.Data.NIRS.T50, app.Data.NIRS.T100);
                 else
                     app.Data.NIRS.T50 = NaN;
                     app.Data.NIRS.T100 = NaN;
@@ -396,28 +432,36 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.fileLabel.Text = app.Data.NIRS.filename;
             
             % NIRS value labels
-            if isfield(app.Data.NIRS, 'halfmin')
-                app.NIRS_value.Text = sprintf('30s: %.2f, 60s: %.2f, 90s: %.2f, 120s: %.2f, 150s: %.2f, 180s: %.2f', app.Data.NIRS.halfmin);
+            if isfield(app.Data.NIRS, 'TSI_halfmin') && isfield(app.Data.NIRS, 'TotalHb_halfmin')
+                app.NIRS_value.Text = sprintf('TSI - 30s: %.2f, 60s: %.2f, 90s: %.2f, 120s: %.2f, 150s: %.2f, 180s: %.2f \nTotalHb - 30s: %.2f, 60s: %.2f, 90s: %.2f, 120s: %.2f, 150s: %.2f, 180s: %.2f', ...
+                    app.Data.NIRS.TSI_halfmin, app.Data.NIRS.TotalHb_halfmin);
                 
-                % Enhanced nadir display with recovery metrics
+                % Nadir display (exercise-related)
                 nadir_text = sprintf('Reduction of %.2f %% after %.1f s', app.Data.NIRS.reduction_nadir, app.Data.NIRS.time_nadir);
+                app.NIRS_nadir_value.Text = nadir_text;
+                
+                % Recovery display (recovery-related)
                 if isfield(app.Data.NIRS, 'T50') && isfield(app.Data.NIRS, 'T100')
+                    recovery_text = '';
                     if ~isnan(app.Data.NIRS.T50)
-                        nadir_text = [nadir_text, sprintf(' | T50: %.1f s', app.Data.NIRS.T50)];
+                        recovery_text = sprintf('T50: %.1f s', app.Data.NIRS.T50);
                     else
-                        nadir_text = [nadir_text, ' | T50: Not achieved'];
+                        recovery_text = 'T50: Not achieved';
                     end
                     
                     if ~isnan(app.Data.NIRS.T100)
-                        nadir_text = [nadir_text, sprintf(', T100: %.1f s', app.Data.NIRS.T100)];
+                        recovery_text = [recovery_text, sprintf(', T100: %.1f s', app.Data.NIRS.T100)];
                     else
-                        nadir_text = [nadir_text, ', T100: Not achieved'];
+                        recovery_text = [recovery_text, ', T100: Not achieved'];
                     end
+                    app.NIRS_recovery_value.Text = recovery_text;
+                else
+                    app.NIRS_recovery_value.Text = 'Recovery analysis not performed';
                 end
-                app.NIRS_nadir_value.Text = nadir_text;
             else
                 app.NIRS_value.Text = 'Segments not selected';
                 app.NIRS_nadir_value.Text = 'Segments not selected';
+                app.NIRS_recovery_value.Text = 'Segments not selected';
             end
             
             % HCR value labels and controls
@@ -446,6 +490,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.HCR.Enable = 'on';
             
             can_save_csv = isfield(app.Data.NIRS, 'recorvery') && ...
+                           isfield(app.Data.NIRS, 'TSI_halfmin') && ...
+                           isfield(app.Data.NIRS, 'TotalHb_halfmin') && ...
                            isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && ...
                            isfield(app.Data.HCR, 'target');
             app.save_csv.Enable = matlab.lang.OnOffSwitchState(can_save_csv);
@@ -617,6 +663,11 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 return;
             end
             
+            if ~isfield(app.Data.NIRS, 'TSI_halfmin') || ~isfield(app.Data.NIRS, 'TotalHb_halfmin')
+                uialert(app.UIFigure, 'NIRS analysis not complete. Please ensure all segments are selected and calculations performed.', 'Analysis Missing');
+                return;
+            end
+            
             if ~isfield(app.Data, 'HCR') || isempty(app.Data.HCR) || ~isfield(app.Data.HCR, 'target')
                 uialert(app.UIFigure, 'Please load and process HCR data before saving.', 'HCR Data Missing');
                 return;
@@ -626,13 +677,16 @@ classdef NIRS_HCR < matlab.apps.AppBase
             if isequal(file, 0); return; end
             csv_filename = fullfile(path, file);
 
-            % Define table structure
+            % Define table structure with clear TSI and TotalHb labeling
             var_names = {'NIRS_filename', 'NIRS_reduction', 'TimeNadir','MeanRed', ...
-                         'NIRS_30s','NIRS_60s','NIRS_90s','NIRS_120s','NIRS_150s','NIRS_180s', ...
+                         'TSI_30s','TSI_60s','TSI_90s','TSI_120s','TSI_150s','TSI_180s', ...
+                         'TotalHb_30s','TotalHb_60s','TotalHb_90s','TotalHb_120s','TotalHb_150s','TotalHb_180s', ...
                          'T50', 'T100', ...
                          'HCR_filename','HCR_30s','HCR_60s','HCR_90s','HCR_120s','HCR_150s','HCR_180s','Max_HCR',...
                          'HCR_target_30s','HCR_target_60s','HCR_target_90s','HCR_target_120s','HCR_target_150s','HCR_target_180s'};
-            var_types = {'string', 'double','double','double','double','double','double','double','double','double', ...
+            var_types = {'string', 'double','double','double', ...
+                         'double','double','double','double','double','double', ...
+                         'double','double','double','double','double','double', ...
                          'double', 'double', ...
                          'string','double','double','double','double','double','double','double','double','double','double','double','double','double'};
 
@@ -649,7 +703,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
             end
             
             % Create new row by expanding the arrays into individual cells
-            nirs_halfmin_cell = num2cell(app.Data.NIRS.halfmin);
+            TSI_halfmin_cell = num2cell(app.Data.NIRS.TSI_halfmin);
+            TotalHb_halfmin_cell = num2cell(app.Data.NIRS.TotalHb_halfmin);
             hcr_halfmin_cell = num2cell(app.Data.HCR.halfmin);
             hcr_target_cell = num2cell(app.Data.HCR.target);
 
@@ -657,7 +712,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
                       app.Data.NIRS.reduction_nadir, ...
                       app.Data.NIRS.time_nadir, ...
                       app.Data.NIRS.mean_reduction, ...
-                      nirs_halfmin_cell{:}, ...
+                      TSI_halfmin_cell{:}, ...
+                      TotalHb_halfmin_cell{:}, ...
                       app.Data.NIRS.T50, ...
                       app.Data.NIRS.T100, ...
                       app.Data.HCR.filename, ...
@@ -869,7 +925,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % Create SelectsegmentsPanel
             app.SelectsegmentsPanel = uipanel(app.UIFigure);
             app.SelectsegmentsPanel.TitlePosition = 'centertop';
-            app.SelectsegmentsPanel.Title = 'Select segments (Recovery is automatic)';
+            app.SelectsegmentsPanel.Title = 'Select segments';
             app.SelectsegmentsPanel.Visible = 'off';
             app.SelectsegmentsPanel.Position = [195 0 213 53];
 
@@ -930,22 +986,12 @@ classdef NIRS_HCR < matlab.apps.AppBase
 
             % Create HCR_on_target
             app.HCR_on_target = uilabel(app.UIFigure);
-            app.HCR_on_target.Position = [953 280 200 60];
+            app.HCR_on_target.Position = [953 280 210 66];
             app.HCR_on_target.Text = '';
             app.HCR_on_target.FontWeight = 'bold';
             app.HCR_on_target.VerticalAlignment = 'top';
 
-            % Create NIRS_label
-            app.NIRS_label = uilabel(app.UIFigure);
-            app.NIRS_label.FontWeight = 'bold';
-            app.NIRS_label.Position = [633 224 67 22];
-            app.NIRS_label.Text = 'NIRS AUC:';
-
-            % Create NIRS_value
-            app.NIRS_value = uilabel(app.UIFigure);
-            app.NIRS_value.Position = [706 224 466 22];
-            app.NIRS_value.Text = 'No NIRS selected';
-
+            
             % Create SaveCSVButton
             app.SaveCSVButton = uibutton(app.UIFigure, 'push');
             app.SaveCSVButton.FontSize = 18;
@@ -956,7 +1002,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.SaveCSVButton.ButtonPushedFcn = createCallbackFcn(app, @save_csvClicked, true);
             
 
-            % Create NIRS_label_2
+            % Create NIRS_Nadir
             app.NIRS_label_2 = uilabel(app.UIFigure);
             app.NIRS_label_2.FontWeight = 'bold';
             app.NIRS_label_2.Position = [633 182 72 22];
@@ -966,6 +1012,29 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.NIRS_nadir_value = uilabel(app.UIFigure);
             app.NIRS_nadir_value.Position = [706 182 466 22];
             app.NIRS_nadir_value.Text = 'No NIRS selected';
+            
+            % Create NIRS_Recovery
+            app.NIRS_recovery_label = uilabel(app.UIFigure);
+            app.NIRS_recovery_label.FontWeight = 'bold';
+            app.NIRS_recovery_label.Position = [633 158 85 22];
+            app.NIRS_recovery_label.Text = 'NIRS Recovery:';
+
+            % Create NIRS_recovery_value
+            app.NIRS_recovery_value = uilabel(app.UIFigure);
+            app.NIRS_recovery_value.Position = [706 158 466 22];
+            app.NIRS_recovery_value.Text = 'No NIRS selected';
+            
+            % Create NIRS_AUC
+            app.NIRS_label = uilabel(app.UIFigure);
+            app.NIRS_label.FontWeight = 'bold';
+            app.NIRS_label.Position = [633 224 67 22];
+            app.NIRS_label.Text = 'NIRS AUC:';
+
+            % Create NIRS_value
+            app.NIRS_value = uilabel(app.UIFigure);
+            app.NIRS_value.Position = [706 212 500 44];
+            app.NIRS_value.WordWrap = 'on';
+            app.NIRS_value.Text = 'No NIRS selected';
 
             % Show the figure after all components are created
             app.UIFigure.Visible = 'on';
