@@ -28,6 +28,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
         SelectsegmentsPanel      matlab.ui.container.Panel
         ExerciseButton           matlab.ui.control.Button
         BaselineButton           matlab.ui.control.Button
+        RecoveryButton           matlab.ui.control.Button
         FilterPanel              matlab.ui.container.Panel
         lowpassHzSpinner_2       matlab.ui.control.Spinner
         lowpassHzSpinner_2Label  matlab.ui.control.Label
@@ -58,6 +59,12 @@ classdef NIRS_HCR < matlab.apps.AppBase
             cla(app.ax1,"reset");
             cla(app.ax2,"reset");
             cla(app.ax3,"reset");
+            
+            % Clear any custom labels that might exist
+            reduction_labels = findobj(app.UIFigure, 'Tag', 'ReductionLabel');
+            delete(reduction_labels);
+            reduction_title = findobj(app.UIFigure, 'Tag', 'ReductionTitle');
+            delete(reduction_title);
             
             % Reset UI labels
             app.fileLabel.Text = 'No file open';
@@ -311,7 +318,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
 
             % --- Plot ax1: Oxy and Deoxy Hb ---
             cla(app.ax1);
-            yyaxis(app.ax1, "left");
+            hold(app.ax1, 'off');  % Ensure clean state
             hold(app.ax1, 'on');
             plot(app.ax1, time, O2Hb, 'r-', 'DisplayName', 'O2Hb');
             plot(app.ax1, time, HHb, 'b-', 'DisplayName', 'HHb');
@@ -322,7 +329,7 @@ classdef NIRS_HCR < matlab.apps.AppBase
             
             % --- Plot ax2: TSI ---
             cla(app.ax2);
-            yyaxis(app.ax2, "left");
+            hold(app.ax2, 'off');  % Ensure clean state
             plot(app.ax2, time, TSI, 'k', 'DisplayName', 'TSI');
             ylabel(app.ax2, 'TSI (%)');
             hold(app.ax2, 'on');
@@ -371,17 +378,6 @@ classdef NIRS_HCR < matlab.apps.AppBase
                         plot(app.ax2, [t100_time, t100_time], y_limits, 'b-', 'LineWidth', 2, 'DisplayName', 'T100');
                     end
                 end
-                
-                % Set up relative y-axis
-                yyaxis(app.ax2, "right");
-                current_ylim = get(app.ax2, 'YLim');
-                current_ytick = get(app.ax2, 'YTick');
-                relative_ticks = 100 * (current_ytick - mean_baseline_TSI) / mean_baseline_TSI;
-                yticklabels(app.ax2, sprintfc('%.1f', relative_ticks));
-                ylabel(app.ax2, 'Reduction (%)');
-            else
-                yyaxis(app.ax2, "right");
-                yticklabels(app.ax2, []);
             end
             
             hold(app.ax2, 'off');
@@ -489,7 +485,9 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.refreshICON.Enable = 'on';
             app.HCR.Enable = 'on';
             
-            can_save_csv = isfield(app.Data.NIRS, 'recorvery') && ...
+            % CSV saving requires NIRS baseline + exercise data and HCR target calculations
+            can_save_csv = isfield(app.Data.NIRS, 'baseline') && ~isempty(app.Data.NIRS.baseline) && ...
+                           isfield(app.Data.NIRS, 'exercise') && ~isempty(app.Data.NIRS.exercise) && ...
                            isfield(app.Data.NIRS, 'TSI_halfmin') && ...
                            isfield(app.Data.NIRS, 'TotalHb_halfmin') && ...
                            isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && ...
@@ -505,6 +503,14 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % and returns the corresponding data indices.
             time_indices = [];
             try
+                % Inform user what to do
+                uiconfirm(app.UIFigure, ...
+                    'Click two points on the TSI plot to select a time segment. First click = start, second click = end.', ...
+                    'Segment Selection', ...
+                    'Options', {'OK'}, ...
+                    'DefaultOption', 'OK', ...
+                    'Icon', 'info');
+                
                 % Set up figure handle visibility, run ginput, and return state
                 fhv = app.UIFigure.HandleVisibility;        % Current status
                 app.UIFigure.HandleVisibility = 'callback'; % Temp change (or, 'on') 
@@ -513,10 +519,25 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 app.UIFigure.HandleVisibility = fhv;        % return original state
 
                 if length(x_coords) < 2
+                    uialert(app.UIFigure, 'Selection cancelled or incomplete. Please try again.', 'Selection Cancelled');
                     return; % User cancelled or didn't select two points
                 end
 
                 time_indices = find(app.Data.NIRS.time > min(x_coords) & app.Data.NIRS.time < max(x_coords));
+                
+                if isempty(time_indices)
+                    uialert(app.UIFigure, 'No data points found in selected time range. Please try a different selection.', 'Selection Error');
+                else
+                    selected_duration = max(x_coords) - min(x_coords);
+                    uiconfirm(app.UIFigure, ...
+                        sprintf('Segment selected: %.1f to %.1f seconds (duration: %.1f s, %d data points)', ...
+                        min(x_coords), max(x_coords), selected_duration, length(time_indices)), ...
+                        'Selection Confirmed', ...
+                        'Options', {'OK'}, ...
+                        'DefaultOption', 'OK', ...
+                        'Icon', 'success');
+                end
+                
             catch ME
                 uialert(app.UIFigure, ['Could not select segment: ' ME.message], 'Selection Error');
             end
@@ -658,8 +679,13 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % Callback for 'Save CSV' button. Appends current results to a CSV file.
             
             % Check if required data exists
-            if ~isfield(app.Data.NIRS, 'recorvery')
-                uialert(app.UIFigure, 'Please select all NIRS segments (baseline, exercise, recovery) before saving.', 'Data Missing');
+            if ~isfield(app.Data.NIRS, 'baseline') || isempty(app.Data.NIRS.baseline)
+                uialert(app.UIFigure, 'Please select baseline segment before saving.', 'Data Missing');
+                return;
+            end
+            
+            if ~isfield(app.Data.NIRS, 'exercise') || isempty(app.Data.NIRS.exercise)
+                uialert(app.UIFigure, 'Please select exercise segment before saving.', 'Data Missing');
                 return;
             end
             
@@ -673,12 +699,14 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 return;
             end
             
-            [file, path] = uigetfile('*.csv', 'Select (data will be appended) or Create Output CSV File', 'NIRS_HCR_output.csv');
+            % Allow user to save to a new file or select existing one
+            [file, path] = uiputfile('*.csv', 'Save Output CSV File', 'NIRS_HCR_output.csv');
             if isequal(file, 0); return; end
             csv_filename = fullfile(path, file);
 
             % Check if file exists and inform user about appending
-            if exist(csv_filename, 'file')
+            file_exists = exist(csv_filename, 'file');
+            if file_exists
                 choice = uiconfirm(app.UIFigure, ...
                     sprintf('The file "%s" already exists. Your data will be appended as a new row to the existing data.', file), ...
                     'Append to Existing File', ...
@@ -688,14 +716,21 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 if strcmp(choice, 'Cancel')
                     return;
                 end
+            else
+                uiconfirm(app.UIFigure, ...
+                    sprintf('A new CSV file "%s" will be created with proper column headers.', file), ...
+                    'Creating New File', ...
+                    'Options', {'OK'}, ...
+                    'DefaultOption', 'OK', ...
+                    'Icon', 'info');
             end
 
             % Define table structure with clear TSI and TotalHb labeling
-            var_names = {'NIRS_filename', 'NIRS_reduction', 'TimeNadir','MeanRed', ...
+            var_names = {'NIRS_filename', 'NIRS_reduction_nadir', 'Time_to_nadir_s','Mean_reduction', ...
                          'TSI_30s','TSI_60s','TSI_90s','TSI_120s','TSI_150s','TSI_180s', ...
                          'TotalHb_30s','TotalHb_60s','TotalHb_90s','TotalHb_120s','TotalHb_150s','TotalHb_180s', ...
-                         'T50', 'T100', ...
-                         'HCR_filename','HCR_30s','HCR_60s','HCR_90s','HCR_120s','HCR_150s','HCR_180s','Max_HCR',...
+                         'T50_recovery_s', 'T100_recovery_s', ...
+                         'HCR_filename','HCR_30s','HCR_60s','HCR_90s','HCR_120s','HCR_150s','HCR_180s','Max_HCR_power',...
                          'HCR_target_30s','HCR_target_60s','HCR_target_90s','HCR_target_120s','HCR_target_150s','HCR_target_180s'};
             var_types = {'string', 'double','double','double', ...
                          'double','double','double','double','double','double', ...
@@ -704,9 +739,15 @@ classdef NIRS_HCR < matlab.apps.AppBase
                          'string','double','double','double','double','double','double','double','double','double','double','double','double','double'};
 
             % Read existing table or create a new one
-            if exist(csv_filename, 'file')
+            if file_exists
                 try
                     output_table = readtable(csv_filename);
+                    % Verify that the existing table has the same structure
+                    if width(output_table) ~= length(var_names)
+                        uialert(app.UIFigure, ['Existing CSV file has different structure (', num2str(width(output_table)), ...
+                            ' columns vs expected ', num2str(length(var_names)), '). Please use a different file or delete the existing one.'], 'Structure Mismatch');
+                        return;
+                    end
                 catch ME
                     uialert(app.UIFigure, ['Could not read existing CSV file. Please check the file. Error: ' ME.message], 'CSV Error');
                     return;
@@ -716,10 +757,30 @@ classdef NIRS_HCR < matlab.apps.AppBase
             end
             
             % Create new row by expanding the arrays into individual cells
-            TSI_halfmin_cell = num2cell(app.Data.NIRS.TSI_halfmin);
-            TotalHb_halfmin_cell = num2cell(app.Data.NIRS.TotalHb_halfmin);
-            hcr_halfmin_cell = num2cell(app.Data.HCR.halfmin);
-            hcr_target_cell = num2cell(app.Data.HCR.target);
+            % Ensure arrays have exactly 6 elements (pad with NaN if necessary)
+            TSI_halfmin_padded = app.Data.NIRS.TSI_halfmin;
+            if length(TSI_halfmin_padded) < 6
+                TSI_halfmin_padded(end+1:6) = NaN;
+            end
+            TSI_halfmin_cell = num2cell(TSI_halfmin_padded(1:6));
+            
+            TotalHb_halfmin_padded = app.Data.NIRS.TotalHb_halfmin;
+            if length(TotalHb_halfmin_padded) < 6
+                TotalHb_halfmin_padded(end+1:6) = NaN;
+            end
+            TotalHb_halfmin_cell = num2cell(TotalHb_halfmin_padded(1:6));
+            
+            hcr_halfmin_padded = app.Data.HCR.halfmin;
+            if length(hcr_halfmin_padded) < 6
+                hcr_halfmin_padded(end+1:6) = NaN;
+            end
+            hcr_halfmin_cell = num2cell(hcr_halfmin_padded(1:6));
+            
+            hcr_target_padded = app.Data.HCR.target;
+            if length(hcr_target_padded) < 6
+                hcr_target_padded(end+1:6) = NaN;
+            end
+            hcr_target_cell = num2cell(hcr_target_padded(1:6));
 
             newRow = {app.Data.NIRS.filename, ...
                       app.Data.NIRS.reduction_nadir, ...
@@ -737,8 +798,8 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % Append and write
             try
                 output_table = [output_table; newRow];
-                writetable(output_table, csv_filename);
-                uialert(app.UIFigure, 'Data successfully appended to CSV.', 'Save Complete');
+                writetable(output_table, csv_filename, 'WriteMode', 'overwrite');
+                uialert(app.UIFigure, ['Data successfully saved to CSV file: ', csv_filename], 'Save Complete');
             catch ME
                 uialert(app.UIFigure, ['Could not write to CSV file. Is it open in another program? Error: ' ME.message], 'CSV Write Error');
             end
@@ -776,12 +837,22 @@ classdef NIRS_HCR < matlab.apps.AppBase
         % --- UI CONTROL CALLBACKS --- %
 
         function CalculateButtonPushed(app, event)         
-            % Only perform calculation if HCR data exists and is not empty
+            % Recalculate HCR target zone analysis using the user-specified max power
             if isfield(app.Data, 'HCR') && ~isempty(app.Data.HCR) && isfield(app.Data.HCR, 'SumN')
+                % Update the max power from the user input
                 app.Data.HCR.max = get(app.MaxPowerNEditField, 'value');
+                
+                % Inform user what's happening
+                uiconfirm(app.UIFigure, ...
+                    sprintf('Recalculating HCR target zone analysis with max power = %.2f N', app.Data.HCR.max), ...
+                    'Updating HCR Analysis', ...
+                    'Options', {'OK'}, ...
+                    'DefaultOption', 'OK', ...
+                    'Icon', 'info');
+                
                 refreshDisplay(app); % Recalculate and replot with new max power
             else
-                uialert(app.UIFigure, 'No HCR data loaded. Please load HCR data first.', 'HCR Data Missing');
+                uialert(app.UIFigure, 'No HCR data loaded. Please load HCR data first using the toolbar button.', 'HCR Data Missing');
             end
         end
 
@@ -807,6 +878,15 @@ classdef NIRS_HCR < matlab.apps.AppBase
                         fprintf('Warning: No recovery data available after exercise\n');
                     end
                 end
+            end
+            refreshDisplay(app);
+        end
+
+        function RecoveryButtonPushed(app, event)
+            recovery_indices = selectTimeSegment(app);
+            if ~isempty(recovery_indices)
+                app.Data.NIRS.recorvery = recovery_indices;
+                fprintf('Recovery manually set from index %d to %d\n', recovery_indices(1), recovery_indices(end));
             end
             refreshDisplay(app);
         end
@@ -897,14 +977,17 @@ classdef NIRS_HCR < matlab.apps.AppBase
             title(app.ax2, 'TSI')
             xlabel(app.ax2, 'Time (s)')
             ylabel(app.ax2, 'TSI (%)')
-            app.ax2.Position = [14 56 609 245];
-
-            % Create ax1
+            app.ax2.Position = [14 56 609 245];  % Original width restored
+            
+            % Create ax1  
             app.ax1 = uiaxes(app.UIFigure);
             title(app.ax1, 'Oxy and Deoxy Hb')
             xlabel(app.ax1, 'Time (s)')
             ylabel(app.ax1, 'Concentration (\mug)')
-            app.ax1.Position = [14 300 609 242];
+            app.ax1.Position = [14 300 609 242];  % Original width restored
+            
+            % Ensure axes are properly aligned
+            linkaxes([app.ax1, app.ax2], 'x');
 
             % Create FilterPanel
             app.FilterPanel = uipanel(app.UIFigure);
@@ -940,25 +1023,34 @@ classdef NIRS_HCR < matlab.apps.AppBase
             app.SelectsegmentsPanel.TitlePosition = 'centertop';
             app.SelectsegmentsPanel.Title = 'Select segments';
             app.SelectsegmentsPanel.Visible = 'off';
-            app.SelectsegmentsPanel.Position = [195 0 213 53];
+            app.SelectsegmentsPanel.Position = [195 0 315 53];
 
             % Create BaselineButton
             app.BaselineButton = uibutton(app.SelectsegmentsPanel, 'push');
             app.BaselineButton.ButtonPushedFcn = createCallbackFcn(app, @BaselineButtonPushed, true);
             app.BaselineButton.Position = [1 2 100 29];
             app.BaselineButton.Text = 'Baseline';
+            app.BaselineButton.Tooltip = {'Select baseline segment: click two points on TSI plot to define time range'};
 
             % Create ExerciseButton
             app.ExerciseButton = uibutton(app.SelectsegmentsPanel, 'push');
             app.ExerciseButton.ButtonPushedFcn = createCallbackFcn(app, @ExerciseButtonPushed, true);
             app.ExerciseButton.Position = [105 2 100 29];
             app.ExerciseButton.Text = 'Exercise';
+            app.ExerciseButton.Tooltip = {'Select exercise segment: click two points on TSI plot to define time range (recovery will be auto-set)'};
+
+            % Create RecoveryButton
+            app.RecoveryButton = uibutton(app.SelectsegmentsPanel, 'push');
+            app.RecoveryButton.ButtonPushedFcn = createCallbackFcn(app, @RecoveryButtonPushed, true);
+            app.RecoveryButton.Position = [209 2 100 29];
+            app.RecoveryButton.Text = 'Recovery';
+            app.RecoveryButton.Tooltip = {'Manually select recovery segment (optional - recovery is auto-set after exercise)'};
 
             % Create fileLabel
             app.fileLabel = uilabel(app.UIFigure);
             app.fileLabel.FontSize = 24;
             app.fileLabel.FontWeight = 'bold';
-            app.fileLabel.Position = [420 2 304 51];
+            app.fileLabel.Position = [520 2 304 51];
             app.fileLabel.Text = 'No file open';
 
             % Create HCRAUCLabel
@@ -993,13 +1085,14 @@ classdef NIRS_HCR < matlab.apps.AppBase
             % Create CalculateButton
             app.CalculateButton = uibutton(app.UIFigure, 'push');
             app.CalculateButton.Enable = 'off';
-            app.CalculateButton.Position = [850 297 65 25];
-            app.CalculateButton.Text = 'Calculate!';
+            app.CalculateButton.Position = [850 297 115 25];
+            app.CalculateButton.Text = 'Update HCR Target';
+            app.CalculateButton.Tooltip = {'Recalculate HCR target zone analysis using the specified max power value'};
             app.CalculateButton.ButtonPushedFcn = createCallbackFcn(app, @CalculateButtonPushed, true);
 
             % Create HCR_on_target
             app.HCR_on_target = uilabel(app.UIFigure);
-            app.HCR_on_target.Position = [953 280 210 66];
+            app.HCR_on_target.Position = [975 280 210 66];
             app.HCR_on_target.Text = '';
             app.HCR_on_target.FontWeight = 'bold';
             app.HCR_on_target.VerticalAlignment = 'top';
