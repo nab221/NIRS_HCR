@@ -585,7 +585,14 @@ classdef NIRS_HCR < matlab.apps.AppBase
             
             % Perform conversion
             try
-                uiprogress(app.UIFigure, 'Title', 'Converting Oxysoft File...', 'Message', 'This may take a moment.');
+                % Show progress (compatible with older MATLAB versions)
+                if exist('uiprogressdlg', 'file')
+                    progressDlg = uiprogressdlg(app.UIFigure, 'Title', 'Converting Oxysoft File...', 'Message', 'This may take a moment.');
+                else
+                    % Fallback for older MATLAB versions - just show a message
+                    fprintf('Converting Oxysoft File... This may take a moment.\n');
+                end
+                
                 [nirs_data, events] = oxysoft2matlab(full_oxy_path, 'oxy/dxy', full_save_path, true, full_proj_path);
                 nirs_data.events = events;
                 nirs_data.filename = save_file;
@@ -594,11 +601,20 @@ classdef NIRS_HCR < matlab.apps.AppBase
                 resetAppData(app);
                 loadNIRSData(app, nirs_data, save_file);
                 refreshDisplay(app);
+                
+                % Close progress dialog if it exists
+                if exist('progressDlg', 'var') && isvalid(progressDlg)
+                    close(progressDlg);
+                end
+                
                 uialert(app.UIFigure, 'Conversion successful!', 'Success');
             catch ME
+                % Close progress dialog if it exists
+                if exist('progressDlg', 'var') && isvalid(progressDlg)
+                    close(progressDlg);
+                end
                 uialert(app.UIFigure, ['File conversion failed: ' ME.message], 'Conversion Error');
             end
-            close(uiprogress);
         end
 
         function OpenMenuSelected(app, event)
